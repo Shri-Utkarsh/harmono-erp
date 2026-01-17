@@ -28,9 +28,9 @@ function App() {
   const refreshAll = async () => {
     try {
       const [pRes, tRes, wRes] = await Promise.all([
-        axios.get("http://localhost:5000/api/products"),
-        axios.get("http://localhost:5000/api/transactions"),
-        axios.get("http://localhost:5000/api/workorders"),
+        axios.get("https://harmono-backend.onrender.com/api/products"),
+        axios.get("https://harmono-backend.onrender.com/api/transactions"),
+        axios.get("https://harmono-backend.onrender.com/api/workorders"),
       ]);
       setProducts(pRes.data);
       setTransactions(tRes.data);
@@ -54,7 +54,7 @@ function App() {
     e.preventDefault();
     if (!newProduct.name) return;
     try {
-      await axios.post("http://localhost:5000/api/products", newProduct);
+      await axios.post("https://harmono-backend.onrender.com/api/products", newProduct);
       alert("✅ Item Added Successfully!");
       setNewProduct({
         name: "",
@@ -73,7 +73,7 @@ function App() {
     if (!jobForm.productId || !jobForm.assignedTo || !jobForm.quantity)
       return alert("Fill all fields");
     try {
-      await axios.post("http://localhost:5000/api/workorders/issue", jobForm);
+      await axios.post("https://harmono-backend.onrender.com/api/workorders/issue", jobForm);
       alert(`Job assigned.`);
       setJobForm({ productId: "", assignedTo: "", quantity: "" });
       refreshAll();
@@ -84,7 +84,7 @@ function App() {
   const handleCompleteJob = async (id) => {
     if (!window.confirm("Receive goods?")) return;
     try {
-      await axios.put(`http://localhost:5000/api/workorders/${id}/complete`);
+      await axios.put(`https://harmono-backend.onrender.com/api/workorders/${id}/complete`);
       refreshAll();
     } catch (err) {
       alert("Error");
@@ -93,7 +93,7 @@ function App() {
   const handleDeleteTransaction = async (id) => {
     if (!window.confirm("Delete?")) return;
     try {
-      await axios.delete(`http://localhost:5000/api/transactions/${id}`);
+      await axios.delete(`https://harmono-backend.onrender.com/api/transactions/${id}`);
       refreshAll();
     } catch (err) {
       alert("Failed");
@@ -118,7 +118,7 @@ function App() {
       });
     try {
       await axios.put(
-        `http://localhost:5000/api/products/${selectedProduct._id}/recipe`,
+        `https://harmono-backend.onrender.com/api/products/${selectedProduct._id}/recipe`,
         { recipe: updatedRecipe },
       );
       refreshAll();
@@ -130,7 +130,7 @@ function App() {
     const updated = selectedProduct.recipe.filter((_, i) => i !== index);
     try {
       await axios.put(
-        `http://localhost:5000/api/products/${selectedProduct._id}/recipe`,
+        `https://harmono-backend.onrender.com/api/products/${selectedProduct._id}/recipe`,
         { recipe: updated },
       );
       refreshAll();
@@ -141,7 +141,7 @@ function App() {
   const handleManufacture = async () => {
     if (!buildQty) return;
     try {
-      await axios.post("http://localhost:5000/api/manufacture", {
+      await axios.post("https://harmono-backend.onrender.com/api/manufacture", {
         productId: selectedProduct._id,
         quantityToBuild: Number(buildQty),
       });
@@ -236,7 +236,7 @@ function App() {
     if (!clientName) return; // Cancelled
 
     try {
-      await axios.put(`http://localhost:5000/api/workorders/${id}/deliver`, {
+      await axios.put(`https://harmono-backend.onrender.com/api/workorders/${id}/deliver`, {
         clientName,
       });
       alert("✅ Delivery Recorded! Stock adjusted virtually.");
