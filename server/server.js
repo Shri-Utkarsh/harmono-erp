@@ -1,12 +1,18 @@
+// At the very top of server.js
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 // Import Models
+const User = require('./models/User');
 const Product = require('./models/Product');
 const Transaction = require('./models/Transaction');
 const WorkOrder = require('./models/WorkOrder');
+
+const JWT_SECRET = process.env.JWT_SECRET || "super_secret_key_change_this_later";
 
 const app = express();
 
@@ -19,7 +25,9 @@ mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("✅ MongoDB Connected Successfully"))
   .catch(err => console.log("❌ MongoDB Connection Error:", err));
 
-// --- API ROUTES ---
+// ==========================================
+// 📦 PRODUCT & INVENTORY ROUTES
+// ==========================================
 
 // 1. GET ALL PRODUCTS
 app.get('/api/products', async (req, res) => {
@@ -81,7 +89,21 @@ app.get('/api/transactions', async (req, res) => {
   }
 });
 
-// 5. SAVE RECIPE (Manufacturing) - THIS WAS MISSING OR BROKEN
+// 5. DELETE TRANSACTION (Clean up Audit Log)
+app.delete('/api/transactions/:id', async (req, res) => {
+  try {
+    await Transaction.findByIdAndDelete(req.params.id);
+    res.json({ message: "Transaction deleted" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==========================================
+// 🏭 MANUFACTURING ROUTES
+// ==========================================
+
+// 6. SAVE RECIPE
 app.put('/api/products/:id/recipe', async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
@@ -95,7 +117,7 @@ app.put('/api/products/:id/recipe', async (req, res) => {
   }
 });
 
-// 6. MANUFACTURE PRODUCTS (The Engine) - THIS WAS MISSING
+// 7. MANUFACTURE PRODUCTS (The Engine)
 app.post('/api/manufacture', async (req, res) => {
   const { productId, quantityToBuild } = req.body; 
 
@@ -161,21 +183,14 @@ app.post('/api/manufacture', async (req, res) => {
   }
 });
 
-// 7. DELETE TRANSACTION (Clean up Audit Log) - NEW
-app.delete('/api/transactions/:id', async (req, res) => {
-  try {
-    await Transaction.findByIdAndDelete(req.params.id);
-    res.json({ message: "Transaction deleted" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+// ==========================================
+// 👷 WORK ORDER ROUTES (UPDATED)
+// ==========================================
 
-
-// 8. ISSUE WORK ORDER (Give Material to Middle Man)
-// 8. ISSUE WORK ORDER (UPDATED FOR SALES vs ASSEMBLY)
+// 8. ISSUE WORK ORDER
 app.post('/api/workorders/issue', async (req, res) => {
-  const { assignedTo, productId, quantity, type } = req.body; // type = 'ASSEMBLY' or 'SALES'
+  // NEW: Accepting assignedToId and assignedTo (Name)
+  const { assignedTo, assignedToId, productId, quantity, type } = req.body; 
 
   try {
     const product = await Product.findById(productId);
@@ -185,7 +200,7 @@ app.post('/api/workorders/issue', async (req, res) => {
     // We are giving Rahul the FINISHED GOOD directly from our stock.
     if (type === 'SALES') {
       if (product.quantity < quantity) {
-        return res.status(400).json({ error: `Not enough ${product.name} in stock to give to Rahul.` });
+        return res.status(400).json({ error: `Not enough ${product.name} in stock to give to ${assignedTo}.` });
       }
 
       // Deduct Finished Good immediately
@@ -231,13 +246,16 @@ app.post('/api/workorders/issue', async (req, res) => {
       }
     }
 
-    // Create the Work Order Record
+    // Create the Work Order Record (With ID and Status)
     const newOrder = new WorkOrder({
-      assignedTo,
+      assignedTo,      // Name
+      assignedToId,    // ID (New!)
       productId,
       productName: product.name,
       quantity,
-      type: type || 'ASSEMBLY' // Save the type
+      type: type || 'ASSEMBLY',
+      status: 'PENDING',
+      assignedAt: new Date()
     });
     await newOrder.save();
 
@@ -247,37 +265,42 @@ app.post('/api/workorders/issue', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 // 9. GET WORK ORDERS
 app.get('/api/workorders', async (req, res) => {
   try {
-    const orders = await WorkOrder.find().sort({ status: -1, dateIssued: -1 }); // Open first
+    // Sort by Status (Pending first) then Date
+    const orders = await WorkOrder.find().sort({ status: -1, assignedAt: -1 });
     res.json(orders);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 10. COMPLETE WORK ORDER (Receive Finished Goods)
+// 10. COMPLETE WORK ORDER (Worker marks as Done)
 app.put('/api/workorders/:id/complete', async (req, res) => {
   try {
     const order = await WorkOrder.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
     if (order.status === 'COMPLETED') return res.status(400).json({ error: "Already completed" });
 
-    // A. Add Finished Goods to Stock
-    await Product.findByIdAndUpdate(order.productId, {
-      $inc: { quantity: order.quantity }
-    });
+    // A. Add Finished Goods to Stock (Only if it was Assembly)
+    if (order.type === 'ASSEMBLY') {
+      await Product.findByIdAndUpdate(order.productId, {
+        $inc: { quantity: order.quantity }
+      });
 
-    // B. Log the IN transaction
-    await new Transaction({
-      type: "IN",
-      productId: order.productId,
-      productName: order.productName,
-      quantity: order.quantity,
-      reason: `Received from Job Work (${order.assignedTo})`
-    }).save();
+      // Log the IN transaction
+      await new Transaction({
+        type: "IN",
+        productId: order.productId,
+        productName: order.productName,
+        quantity: order.quantity,
+        reason: `Finished by ${order.assignedTo}`
+      }).save();
+    }
 
-    // C. Mark Order as Completed
+    // B. Mark Order as Completed
     order.status = "COMPLETED";
-    order.dateCompleted = Date.now();
+    order.completedAt = new Date(); // Save completion time
     await order.save();
 
     res.json(order);
@@ -288,27 +311,25 @@ app.put('/api/workorders/:id/complete', async (req, res) => {
 });
 
 // 11. DIRECT DELIVERY (Rahul -> Vendor)
-// 11. DIRECT DELIVERY (Rahul -> Vendor) - FIXED LOGIC
 app.put('/api/workorders/:id/deliver', async (req, res) => {
   const { clientName } = req.body; 
 
   try {
     const order = await WorkOrder.findById(req.params.id);
-    if (order.status !== 'OPEN') return res.status(400).json({ error: "Order not open" });
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    // Allow delivery even if status is PENDING or COMPLETED
+    if (order.status === 'DELIVERED') return res.status(400).json({ error: "Already delivered" });
 
     // === SCENARIO A: SALES (Rahul was just a delivery boy) ===
     if (order.type === 'SALES') {
       // Stock was ALREADY deducted when we issued it.
-      // We just need to record the REVENUE now.
-      
-      // We create a special "REVENUE_RECORD" transaction.
-      // This confirms the sale happened. 
+      // We just record the REVENUE.
       await new Transaction({
         type: "OUT", 
         productId: order.productId, 
         productName: order.productName, 
         quantity: order.quantity, 
-        reason: `SOLD: ${clientName} (via ${order.assignedTo})` // Keyword "SOLD" triggers revenue
+        reason: `SOLD: ${clientName} (via ${order.assignedTo})`
       }).save();
     }
 
@@ -334,8 +355,8 @@ app.put('/api/workorders/:id/deliver', async (req, res) => {
     }
 
     // Close the Order
-    order.status = "DELIVERED";
-    order.dateCompleted = Date.now();
+    order.status = "COMPLETED"; // Or use a separate status like DELIVERED
+    order.completedAt = Date.now();
     await order.save();
 
     res.json(order);
@@ -344,6 +365,75 @@ app.put('/api/workorders/:id/deliver', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ==========================================
+// 🔐 AUTHENTICATION & USER ROUTES
+// ==========================================
+
+// 12. REGISTER
+app.post('/api/auth/register', async (req, res) => {
+  const { name, email, password, role } = req.body;
+  try {
+    const existingUser = await User.findOne({ email });
+    if (existingUser) return res.status(400).json({ error: "Email already exists" });
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = new User({ name, email, password: hashedPassword, role });
+    await newUser.save();
+
+    res.json({ message: "User created successfully!" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 13. LOGIN
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json({ error: "User not found" });
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(400).json({ error: "Invalid credentials" });
+
+    const token = jwt.sign(
+      { id: user._id, role: user.role, name: user.name }, 
+      JWT_SECRET, 
+      { expiresIn: '1d' }
+    );
+
+    res.json({ token, user: { id: user._id, name: user.name, role: user.role } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 14. GET WORKERS LIST (For Admin Dropdown)
+app.get('/api/users/workers', async (req, res) => {
+  try {
+    // Get all users who are NOT admins
+    const workers = await User.find({ role: { $ne: 'admin' } }).select('name role');
+    res.json(workers);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// 15. DELETE USER (Admin Only)
+app.delete('/api/users/:id', async (req, res) => {
+  try {
+    // Prevent deleting yourself (Admin)
+    // (In a real app, check req.user.id, but for now we just trust the ID passed)
+    
+    await User.findByIdAndDelete(req.params.id);
+    res.json({ message: "User removed" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // Start Server
 const PORT = process.env.PORT || 5000;

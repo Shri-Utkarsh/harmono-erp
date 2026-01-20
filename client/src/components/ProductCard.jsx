@@ -24,7 +24,7 @@ function ProductCard({ product, refreshData }) {
     const adjustment = type === 'IN' ? Number(qty) : -Number(qty);
 
     try {
-      await axios.put(`https://harmono-backend.onrender.com/api/products/${product._id}/stock`, { 
+      await axios.put(`http://localhost:5000/api/products/${product._id}/stock`, { 
         adjustment, 
         reason 
       });
