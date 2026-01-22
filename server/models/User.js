@@ -10,6 +10,7 @@ const UserSchema = new mongoose.Schema({
     enum: ['admin', 'factory', 'delivery'], 
     default: 'factory' 
   },
+  employeeId: { type: String, unique: true }, // NEW: EMP-101
   createdAt: { type: Date, default: Date.now }
 });
 

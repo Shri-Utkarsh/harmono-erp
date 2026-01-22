@@ -1,4 +1,3 @@
-// At the very top of server.js
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -6,435 +5,304 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
-// Import Models
-const User = require('./models/User');
-const Product = require('./models/Product');
-const Transaction = require('./models/Transaction');
-const WorkOrder = require('./models/WorkOrder');
-
-const JWT_SECRET = process.env.JWT_SECRET || "super_secret_key_change_this_later";
-
-const app = express();
-
-// Middleware
-app.use(express.json());
-app.use(cors());
-
-// Connect to MongoDB
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log("✅ MongoDB Connected Successfully"))
-  .catch(err => console.log("❌ MongoDB Connection Error:", err));
-
 // ==========================================
-// 📦 PRODUCT & INVENTORY ROUTES
+// 1. DATABASE MODELS
 // ==========================================
 
-// 1. GET ALL PRODUCTS
-app.get('/api/products', async (req, res) => {
-  try {
-    const products = await Product.find().sort({ name: 1 });
-    res.json(products);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+const UserSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  role: { type: String, enum: ['admin', 'factory', 'delivery'], default: 'factory' },
+  employeeId: { type: String }, 
+  createdAt: { type: Date, default: Date.now }
+});
+const User = mongoose.model('User', UserSchema);
+
+const ProductSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  customId: { type: String, default: 'N/A' }, 
+  category: { type: String, default: 'Raw Material' }, 
+  quantity: { type: Number, default: 0 },
+  price: { type: Number, default: 0 },
+  minLevel: { type: Number, default: 10 },
+  recipe: [{ ingredientId: String, ingredientName: String, qtyRequired: Number }],
+  lastUpdated: { type: Date, default: Date.now }
+});
+const Product = mongoose.model('Product', ProductSchema);
+
+const TransactionSchema = new mongoose.Schema({
+  productId: String,
+  productName: String,
+  productCustomId: String,
+  workOrderId: String, // Critical Link for Excel
+  type: { type: String, enum: ['IN', 'OUT'] },
+  quantity: Number,
+  reason: String,
+  date: { type: Date, default: Date.now }
+});
+const Transaction = mongoose.model('Transaction', TransactionSchema);
+
+const WorkOrderSchema = new mongoose.Schema({
+  assignedTo: String,     
+  assignedToId: String,   
+  assignedToEmpId: String,
+  productName: String,
+  productCustomId: String,
+  productId: String,
+  quantity: Number,
+  clientName: String, 
+  type: { type: String, default: "ASSEMBLY" }, 
+  status: { type: String, enum: ['PENDING', 'COMPLETED'], default: "PENDING" },
+  assignedAt: { type: Date, default: Date.now },    
+  completedAt: Date,
+  proof: {
+    photo: String, 
+    location: { lat: Number, lng: Number }
   }
 });
+const WorkOrder = mongoose.model('WorkOrder', WorkOrderSchema);
 
-// 2. ADD NEW PRODUCT
+// ==========================================
+// 2. SERVER SETUP
+// ==========================================
+
+const JWT_SECRET = process.env.JWT_SECRET || "super_secret_key";
+const app = express();
+
+app.use(express.json({ limit: '50mb' })); 
+app.use(cors());
+
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log("✅ MongoDB Connected"))
+  .catch(err => console.log("❌ DB Error:", err));
+
+// ==========================================
+// 3. API ROUTES
+// ==========================================
+
+// --- PRODUCTS ---
+app.get('/api/products', async (req, res) => res.json(await Product.find().sort({ name: 1 })));
 app.post('/api/products', async (req, res) => {
   try {
     const newProduct = new Product(req.body);
     await newProduct.save();
     res.json(newProduct);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch(e) { res.status(500).json({error: e.message}) }
 });
 
-// 3. UPDATE STOCK (With History Log)
 app.put('/api/products/:id/stock', async (req, res) => {
-  const { adjustment, reason } = req.body; 
-  try {
-    const updatedProduct = await Product.findByIdAndUpdate(
-      req.params.id,
-      { 
-        $inc: { quantity: adjustment }, 
-        $set: { lastUpdated: Date.now() }
-      },
-      { new: true } 
-    );
-    if (!updatedProduct) return res.status(404).json({ error: "Product not found" });
-
-    // Log Transaction
-    await new Transaction({
-      type: adjustment > 0 ? "IN" : "OUT",
-      productId: updatedProduct._id,
-      productName: updatedProduct.name,
-      quantity: Math.abs(adjustment),
-      reason: reason || "Manual Update",
-    }).save();
-
-    res.json(updatedProduct);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 4. GET TRANSACTION HISTORY
-app.get('/api/transactions', async (req, res) => {
-  try {
-    const history = await Transaction.find().sort({ date: -1 }).limit(50);
-    res.json(history);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 5. DELETE TRANSACTION (Clean up Audit Log)
-app.delete('/api/transactions/:id', async (req, res) => {
-  try {
-    await Transaction.findByIdAndDelete(req.params.id);
-    res.json({ message: "Transaction deleted" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ==========================================
-// 🏭 MANUFACTURING ROUTES
-// ==========================================
-
-// 6. SAVE RECIPE
-app.put('/api/products/:id/recipe', async (req, res) => {
-  try {
-    const product = await Product.findById(req.params.id);
-    if (!product) return res.status(404).json({ error: "Product not found" });
-
-    product.recipe = req.body.recipe; // Save the ingredients list
-    await product.save();
-    res.json(product);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 7. MANUFACTURE PRODUCTS (The Engine)
-app.post('/api/manufacture', async (req, res) => {
-  const { productId, quantityToBuild } = req.body; 
-
-  try {
-    // A. Get Product & Recipe
-    const finishedGood = await Product.findById(productId);
-    if (!finishedGood) return res.status(404).json({ error: "Product not found" });
-    
-    if (!finishedGood.recipe || finishedGood.recipe.length === 0) {
-      return res.status(400).json({ error: "No recipe defined. Please add ingredients first." });
-    }
-
-    // B. Check Stock Levels
-    for (const item of finishedGood.recipe) {
-      const ingredient = await Product.findById(item.ingredientId);
-      if (!ingredient) return res.status(400).json({ error: `Ingredient not found` });
-      
-      const totalNeeded = item.qtyRequired * quantityToBuild;
-      if (ingredient.quantity < totalNeeded) {
-        return res.status(400).json({ 
-          error: `Not enough ${ingredient.name}. Need ${totalNeeded}, have ${ingredient.quantity}` 
-        });
-      }
-    }
-
-    // C. Deduct Ingredients
-    for (const item of finishedGood.recipe) {
-      await Product.findByIdAndUpdate(item.ingredientId, {
-        $inc: { quantity: -(item.qtyRequired * quantityToBuild) }
-      });
-      
-      // Log Ingredient Usage
+    const { adjustment, reason } = req.body; 
+    try {
+      const qtyChange = Number(adjustment);
+      const updatedProduct = await Product.findByIdAndUpdate(
+        req.params.id,
+        { $inc: { quantity: qtyChange }, $set: { lastUpdated: Date.now() } },
+        { new: true } 
+      );
+      if (!updatedProduct) return res.status(404).json({ error: "Product not found" });
+  
       await new Transaction({
-        type: "OUT",
-        productId: item.ingredientId,
-        productName: item.ingredientName,
-        quantity: item.qtyRequired * quantityToBuild,
-        reason: `Used for ${quantityToBuild} x ${finishedGood.name}`
+        type: qtyChange > 0 ? "IN" : "OUT",
+        productId: updatedProduct._id,
+        productName: updatedProduct.name,
+        productCustomId: updatedProduct.customId,
+        quantity: Math.abs(qtyChange),
+        reason: reason || "Manual Update",
       }).save();
-    }
-
-    // D. Add Finished Good
-    const updatedFinishedGood = await Product.findByIdAndUpdate(
-      productId,
-      { $inc: { quantity: Number(quantityToBuild) } },
-      { new: true }
-    );
-
-    // Log Production
-    await new Transaction({
-      type: "IN",
-      productId: finishedGood._id,
-      productName: finishedGood.name,
-      quantity: quantityToBuild,
-      reason: "Manufacturing Production"
-    }).save();
-
-    res.json({ message: "Success", product: updatedFinishedGood });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
+  
+      res.json(updatedProduct);
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==========================================
-// 👷 WORK ORDER ROUTES (UPDATED)
-// ==========================================
+app.put('/api/products/:id/recipe', async (req, res) => {
+  await Product.findByIdAndUpdate(req.params.id, { recipe: req.body.recipe });
+  res.json({ success: true });
+});
 
-// 8. ISSUE WORK ORDER
+// --- TRANSACTIONS ---
+app.get('/api/transactions', async (req, res) => res.json(await Transaction.find().sort({ date: -1 }).limit(100)));
+app.delete('/api/transactions/:id', async (req, res) => {
+    await Transaction.findByIdAndDelete(req.params.id);
+    res.json({success: true});
+});
+
+// --- MANUFACTURE ---
+app.post('/api/manufacture', async (req, res) => {
+  const { productId, quantityToBuild } = req.body;
+  try {
+    const product = await Product.findById(productId);
+    if (product.recipe && product.recipe.length > 0) {
+        for (const item of product.recipe) {
+            const ing = await Product.findById(item.ingredientId);
+            if (ing.quantity < item.qtyRequired * quantityToBuild) return res.status(400).json({ error: `Low Stock: ${ing.name}` });
+            await Product.findByIdAndUpdate(item.ingredientId, { $inc: { quantity: -(item.qtyRequired * quantityToBuild) } });
+            await new Transaction({ 
+                type: 'OUT', 
+                productId: item.ingredientId, 
+                productName: item.ingredientName, 
+                productCustomId: ing.customId, 
+                quantity: item.qtyRequired * quantityToBuild, 
+                reason: `Ingredient for ${product.name}` 
+            }).save();
+        }
+    }
+    await Product.findByIdAndUpdate(productId, { $inc: { quantity: quantityToBuild } });
+    await new Transaction({ type: 'IN', productId, productName: product.name, productCustomId: product.customId, quantity: quantityToBuild, reason: 'Manufacturing Production' }).save();
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- WORK ORDERS (FIXED LOGIC HERE) ---
+app.get('/api/users/workers', async (req, res) => {
+  res.json(await User.find({ role: { $ne: 'admin' } }).select('name role employeeId'));
+});
+
 app.post('/api/workorders/issue', async (req, res) => {
-  // NEW: Accepting assignedToId and assignedTo (Name)
-  const { assignedTo, assignedToId, productId, quantity, type } = req.body; 
-
+  const { assignedTo, assignedToId, assignedToEmpId, productId, quantity, type, clientName } = req.body;
   try {
     const product = await Product.findById(productId);
     if (!product) return res.status(404).json({ error: "Product not found" });
 
-    // === SCENARIO A: SALES/DELIVERY ===
-    // We are giving Rahul the FINISHED GOOD directly from our stock.
+    // 1. FIRST VALIDATE STOCK (Do not create order yet)
     if (type === 'SALES') {
-      if (product.quantity < quantity) {
-        return res.status(400).json({ error: `Not enough ${product.name} in stock to give to ${assignedTo}.` });
-      }
-
-      // Deduct Finished Good immediately
-      await Product.findByIdAndUpdate(productId, { $inc: { quantity: -quantity } });
-
-      // Log it
-      await new Transaction({
-        type: "OUT",
-        productId: product._id,
-        productName: product.name,
-        quantity: quantity,
-        reason: `TRANSIT: Given to ${assignedTo}`
-      }).save();
-    }
-
-    // === SCENARIO B: ASSEMBLY (MANUFACTURING) ===
-    // We are giving Rahul INGREDIENTS to build the product.
-    else {
-      if (!product.recipe || product.recipe.length === 0) {
-        return res.status(400).json({ error: "No recipe defined for this product." });
-      }
-
-      // Check & Deduct Ingredients
-      for (const item of product.recipe) {
-        const ingredient = await Product.findById(item.ingredientId);
-        const totalNeeded = item.qtyRequired * quantity;
-
-        if (ingredient.quantity < totalNeeded) {
-          return res.status(400).json({ error: `Not enough ${ingredient.name} (Need ${totalNeeded})` });
+        if(product.quantity < quantity) {
+            return res.status(400).json({error: `Not enough stock! Have: ${product.quantity}, Need: ${quantity}`});
         }
-
-        // Deduct Ingredient
-        await Product.findByIdAndUpdate(item.ingredientId, { $inc: { quantity: -totalNeeded } });
-
-        // Log Ingredient Usage
-        await new Transaction({
-          type: "OUT",
-          productId: item.ingredientId,
-          productName: item.ingredientName,
-          quantity: totalNeeded,
-          reason: `Given to ${assignedTo} to build ${product.name}`
-        }).save();
-      }
+    } else {
+        // Assembly Check
+        if (product.recipe && product.recipe.length > 0) {
+             for(const item of product.recipe) {
+                 const ing = await Product.findById(item.ingredientId);
+                 if (ing.quantity < (item.qtyRequired * quantity)) {
+                     return res.status(400).json({error: `Not enough ${ing.name}`});
+                 }
+             }
+        }
     }
 
-    // Create the Work Order Record (With ID and Status)
-    const newOrder = new WorkOrder({
-      assignedTo,      // Name
-      assignedToId,    // ID (New!)
-      productId,
-      productName: product.name,
-      quantity,
-      type: type || 'ASSEMBLY',
-      status: 'PENDING',
-      assignedAt: new Date()
+    // 2. STOCK EXISTS -> CREATE ORDER OBJECT (But don't save yet)
+    const order = new WorkOrder({ 
+        assignedTo, assignedToId, assignedToEmpId, 
+        productId, productName: product.name, productCustomId: product.customId,
+        quantity, type, clientName, status: 'PENDING',
+        assignedAt: new Date()
     });
-    await newOrder.save();
 
-    res.json(newOrder);
+    // 3. DEDUCT STOCK & LOG TRANSACTION (With WorkOrder ID)
+    if (type === 'SALES') {
+        await Product.findByIdAndUpdate(productId, { $inc: { quantity: -quantity } });
+        
+        await new Transaction({ 
+            type: 'OUT', 
+            productId, 
+            productName: product.name, 
+            productCustomId: product.customId, 
+            quantity, 
+            workOrderId: order._id, // LINKING ID
+            reason: `Out for Delivery: ${clientName || assignedTo}` 
+        }).save();
 
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    } else {
+        // Assembly Deduction
+        if (product.recipe && product.recipe.length > 0) {
+             for(const item of product.recipe) {
+                 const ing = await Product.findById(item.ingredientId);
+                 await Product.findByIdAndUpdate(item.ingredientId, { $inc: { quantity: -(item.qtyRequired * quantity) } });
+                 await new Transaction({ 
+                     type: 'OUT', 
+                     productId: item.ingredientId, 
+                     productName: item.ingredientName, 
+                     productCustomId: ing ? ing.customId : 'N/A', 
+                     quantity: item.qtyRequired * quantity, 
+                     workOrderId: order._id, // LINKING ID
+                     reason: `Used to build ${product.name} (Job: ${assignedTo})` 
+                 }).save();
+             }
+        }
+    }
+
+    // 4. FINALLY SAVE ORDER (Success)
+    await order.save();
+    res.json(order);
+
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 9. GET WORK ORDERS
-app.get('/api/workorders', async (req, res) => {
-  try {
-    // Sort by Status (Pending first) then Date
-    const orders = await WorkOrder.find().sort({ status: -1, assignedAt: -1 });
-    res.json(orders);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+app.get('/api/workorders', async (req, res) => res.json(await WorkOrder.find().sort({ status: -1, assignedAt: -1 })));
 
-// 10. COMPLETE WORK ORDER (Worker marks as Done)
 app.put('/api/workorders/:id/complete', async (req, res) => {
-  try {
-    const order = await WorkOrder.findById(req.params.id);
-    if (!order) return res.status(404).json({ error: "Order not found" });
-    if (order.status === 'COMPLETED') return res.status(400).json({ error: "Already completed" });
+    const { photo } = req.body;
+    try {
+        const order = await WorkOrder.findById(req.params.id);
+        order.status = 'COMPLETED';
+        order.completedAt = Date.now();
+        order.proof = { photo };
+        await order.save();
 
-    // A. Add Finished Goods to Stock (Only if it was Assembly)
-    if (order.type === 'ASSEMBLY') {
-      await Product.findByIdAndUpdate(order.productId, {
-        $inc: { quantity: order.quantity }
-      });
-
-      // Log the IN transaction
-      await new Transaction({
-        type: "IN",
-        productId: order.productId,
-        productName: order.productName,
-        quantity: order.quantity,
-        reason: `Finished by ${order.assignedTo}`
-      }).save();
-    }
-
-    // B. Mark Order as Completed
-    order.status = "COMPLETED";
-    order.completedAt = new Date(); // Save completion time
-    await order.save();
-
-    res.json(order);
-
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+        if(order.type === 'ASSEMBLY') {
+            await Product.findByIdAndUpdate(order.productId, { $inc: { quantity: order.quantity } });
+            await new Transaction({ 
+                type: 'IN', 
+                productId: order.productId, 
+                productName: order.productName, 
+                productCustomId: order.productCustomId, 
+                quantity: order.quantity, 
+                workOrderId: order._id, // Link for Excel
+                reason: `Finished by ${order.assignedTo}` 
+            }).save();
+        }
+        res.json(order);
+    } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 11. DIRECT DELIVERY (Rahul -> Vendor)
 app.put('/api/workorders/:id/deliver', async (req, res) => {
-  const { clientName } = req.body; 
-
-  try {
-    const order = await WorkOrder.findById(req.params.id);
-    if (!order) return res.status(404).json({ error: "Order not found" });
-    // Allow delivery even if status is PENDING or COMPLETED
-    if (order.status === 'DELIVERED') return res.status(400).json({ error: "Already delivered" });
-
-    // === SCENARIO A: SALES (Rahul was just a delivery boy) ===
-    if (order.type === 'SALES') {
-      // Stock was ALREADY deducted when we issued it.
-      // We just record the REVENUE.
-      await new Transaction({
-        type: "OUT", 
-        productId: order.productId, 
-        productName: order.productName, 
-        quantity: order.quantity, 
-        reason: `SOLD: ${clientName} (via ${order.assignedTo})`
-      }).save();
-    }
-
-    // === SCENARIO B: ASSEMBLY (Rahul built it and dropped it off) ===
-    else {
-      // 1. Virtual Stock IN (He built it)
-      await new Transaction({
-        type: "IN", 
-        productId: order.productId, 
-        productName: order.productName, 
-        quantity: order.quantity, 
-        reason: `Finished by ${order.assignedTo} (Virtual)`
-      }).save();
-
-      // 2. Immediate Sale OUT
-      await new Transaction({
-        type: "OUT", 
-        productId: order.productId, 
-        productName: order.productName, 
-        quantity: order.quantity, 
-        reason: `SOLD: ${clientName} (Direct from Job Work)`
-      }).save();
-    }
-
-    // Close the Order
-    order.status = "COMPLETED"; // Or use a separate status like DELIVERED
-    order.completedAt = Date.now();
-    await order.save();
-
-    res.json(order);
-
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    const { photo, location } = req.body;
+    try {
+        const order = await WorkOrder.findById(req.params.id);
+        order.status = 'COMPLETED';
+        order.completedAt = Date.now();
+        order.proof = { photo, location };
+        await order.save();
+        
+        await new Transaction({ 
+            type: 'OUT', 
+            productId: order.productId, 
+            productName: order.productName, 
+            productCustomId: order.productCustomId, 
+            quantity: order.quantity, 
+            workOrderId: order._id, // Link for Excel
+            reason: `SOLD: ${order.clientName || 'Counter Sale'}` 
+        }).save();
+        res.json(order);
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==========================================
-// 🔐 AUTHENTICATION & USER ROUTES
-// ==========================================
-
-// 12. REGISTER
+// --- AUTH ---
 app.post('/api/auth/register', async (req, res) => {
-  const { name, email, password, role } = req.body;
-  try {
-    const existingUser = await User.findOne({ email });
-    if (existingUser) return res.status(400).json({ error: "Email already exists" });
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = new User({ name, email, password: hashedPassword, role });
-    await newUser.save();
-
-    res.json({ message: "User created successfully!" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    const { name, email, password, role } = req.body;
+    try {
+        const count = await User.countDocuments();
+        const employeeId = `EMP-${100 + count + 1}`;
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const newUser = new User({ name, email, password: hashedPassword, role, employeeId });
+        await newUser.save();
+        res.json({ message: "Created" });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 13. LOGIN
 app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
-  try {
+    const { email, password } = req.body;
     const user = await User.findOne({ email });
-    if (!user) return res.status(400).json({ error: "User not found" });
-
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ error: "Invalid credentials" });
-
-    const token = jwt.sign(
-      { id: user._id, role: user.role, name: user.name }, 
-      JWT_SECRET, 
-      { expiresIn: '1d' }
-    );
-
-    res.json({ token, user: { id: user._id, name: user.name, role: user.role } });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    if (!user || !await bcrypt.compare(password, user.password)) return res.status(400).json({ error: "Invalid login" });
+    const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET);
+    res.json({ token, user: { id: user._id, name: user.name, role: user.role, employeeId: user.employeeId } });
 });
 
-// 14. GET WORKERS LIST (For Admin Dropdown)
-app.get('/api/users/workers', async (req, res) => {
-  try {
-    // Get all users who are NOT admins
-    const workers = await User.find({ role: { $ne: 'admin' } }).select('name role');
-    res.json(workers);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
-// 15. DELETE USER (Admin Only)
 app.delete('/api/users/:id', async (req, res) => {
-  try {
-    // Prevent deleting yourself (Admin)
-    // (In a real app, check req.user.id, but for now we just trust the ID passed)
-    
     await User.findByIdAndDelete(req.params.id);
-    res.json({ message: "User removed" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    res.json({ success: true });
 });
 
-
-// Start Server
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const PORT = 5000;
+app.listen(PORT, () => console.log(`Server on ${PORT}`));
